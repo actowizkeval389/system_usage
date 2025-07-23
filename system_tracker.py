@@ -2,6 +2,8 @@ import streamlit as st
 import pymysql
 import pandas as pd
 from datetime import datetime, timedelta
+# --- Change 1: Import pytz ---
+import pytz
 
 # Database configuration
 DB_CONFIG = {
@@ -12,11 +14,16 @@ DB_CONFIG = {
     'charset': 'utf8mb4'
 }
 
+# --- Change 2: Define IST timezone ---
+IST_TZ = pytz.timezone('Asia/Kolkata')
+
 # Initialize database connection
 def init_db():
     try:
         connection = pymysql.connect(**DB_CONFIG)
         with connection.cursor() as cursor:
+            # --- Change 3: Set MySQL session timezone to IST ---
+            cursor.execute("SET time_zone = '+05:30'")
             # Create usage_log table with reason column
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS usage_log (
@@ -37,7 +44,7 @@ def init_db():
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     username VARCHAR(255) NOT NULL,
                     email VARCHAR(255) NOT NULL,
-                    requested_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    requested_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, -- This will now be in IST due to session TZ
                     reason TEXT,
                     INDEX idx_requested_time (requested_time)
                 )
@@ -63,28 +70,35 @@ def get_active_sessions(connection):
         st.error(f"Error fetching active sessions: {e}")
         return []
 
-def start_session(connection, username, email, system_ip, planned_duration, reason): # Add 'reason' parameter
+# --- Change 4: Use IST datetime for start_time ---
+def start_session(connection, username, email, system_ip, planned_duration, reason):
     try:
+        # Get current time in IST
+        ist_now = datetime.now(IST_TZ)
         with connection.cursor() as cursor:
-            # Include 'reason' in the INSERT statement
+            # Include 'reason' in the INSERT statement, use ist_now
             cursor.execute("""
                 INSERT INTO usage_log (username, email, system_ip, start_time, planned_duration, reason)
                 VALUES (%s, %s, %s, %s, %s, %s)
-            """, (username, email, system_ip, datetime.now(), planned_duration, reason)) # Pass 'reason'
+            """, (username, email, system_ip, ist_now, planned_duration, reason))
         connection.commit()
         return True
     except Exception as e:
         st.error(f"Error starting session: {e}")
         return False
 
+# --- Change 5: Use IST datetime for end_time ---
 def end_session(connection, email, system_ip):
     try:
+        # Get current time in IST
+        ist_now = datetime.now(IST_TZ)
         with connection.cursor() as cursor:
+            # Use ist_now for end_time calculation and update
             cursor.execute("""
                 UPDATE usage_log
                 SET end_time = %s, duration_minutes = TIMESTAMPDIFF(MINUTE, start_time, %s)
                 WHERE email = %s AND system_ip = %s AND end_time IS NULL
-            """, (datetime.now(), datetime.now(), email, system_ip))
+            """, (ist_now, ist_now, email, system_ip))
         connection.commit()
         return True
     except Exception as e:
@@ -107,12 +121,16 @@ def get_usage_history(connection):
         return []
 
 # --- New Queue Management Functions ---
+# --- Change 6: Use IST datetime for requested_time (via DEFAULT CURRENT_TIMESTAMP and session TZ) ---
+# The DEFAULT CURRENT_TIMESTAMP in the table definition will now use IST because of the session timezone.
+# If you explicitly wanted to pass it (though not necessary with DEFAULT), you would use ist_now = datetime.now(IST_TZ)
 def add_to_queue(connection, username, email, reason):
     """Adds a user request to the queue."""
     try:
+        # Note: requested_time uses DEFAULT CURRENT_TIMESTAMP which is now IST due to session TZ
         with connection.cursor() as cursor:
             cursor.execute("""
-                INSERT INTO usage_queue (username, email, reason)
+                INSERT INTO usage_queue (username, email, reason) -- requested_time defaults to CURRENT_TIMESTAMP (IST)
                 VALUES (%s, %s, %s)
             """, (username, email, reason))
         connection.commit()
@@ -170,22 +188,34 @@ def get_user_queue_position(connection, email):
          st.error(f"Error getting queue position: {e}")
          return -1
 
-# Calculate time remaining
+# Calculate time remaining - Ensure times used are timezone-aware if comparing with Python datetime
+# --- Change 7: Ensure datetime.now() uses IST for comparisons ---
 def get_time_remaining(start_time, planned_duration):
     if not start_time or not planned_duration:
         return None
+    # Ensure start_time is treated as IST if it's naive (assumed to be IST from DB)
+    if start_time.tzinfo is None:
+        start_time = IST_TZ.localize(start_time)
     end_time = start_time + timedelta(minutes=planned_duration)
-    remaining = end_time - datetime.now()
+    # Get current time in IST for comparison
+    now_ist = datetime.now(IST_TZ)
+    remaining = end_time - now_ist
     return max(0, int(remaining.total_seconds() / 60))
 
-# Check if session is overdue
+# Check if session is overdue - Ensure times used are timezone-aware
+# --- Change 8: Ensure datetime.now() uses IST for comparisons ---
 def is_session_overdue(start_time, planned_duration):
     if not start_time or not planned_duration:
         return False
+    # Ensure start_time is treated as IST if it's naive (assumed to be IST from DB)
+    if start_time.tzinfo is None:
+        start_time = IST_TZ.localize(start_time)
     end_time = start_time + timedelta(minutes=planned_duration)
-    return datetime.now() > end_time
+    # Get current time in IST for comparison
+    now_ist = datetime.now(IST_TZ)
+    return now_ist > end_time
 
-# Format timedelta to human readable
+# Format timedelta to human readable (no change needed here)
 def format_duration(td):
     if td is None:
         return "0m 0s"
@@ -206,26 +236,21 @@ def main_app():
     connection = init_db()
     if not connection:
         st.stop()
-
     # System options
     SYSTEMS = [
         "172.27.131.163",
         "172.27.131.164",
         "172.27.131.165"
     ]
-
     # Get user info from authentication
     user_info = st.session_state.get('user_info', {})
     username = user_info.get('name', 'Unknown User')
     user_email = user_info.get('email', '')
-
     # Header with user info
     st.title(f"Welcome, {username}!")
     st.markdown("---")
-
     # Get active sessions
     active_sessions = get_active_sessions(connection)
-
     # Create a dictionary of systems and their current users
     system_users = {session[2]: {
         'username': session[0],
@@ -234,7 +259,6 @@ def main_app():
         'planned_duration': session[4],
         'reason': session[5] # Add reason to system_users dict
     } for session in active_sessions}
-
     # --- Queue Management ---
     st.subheader("Queue Status")
     # Check if user is already in the queue
@@ -260,7 +284,6 @@ def main_app():
             else:
                 st.error("Failed to remove you from the queue.")
         # --- End Change 1 ---
-
     # Show the queue list
     queue_list = get_queue(connection)
     if queue_list:
@@ -270,10 +293,8 @@ def main_app():
         st.write("No one is currently in the queue.")
     st.markdown("---")
     # --- End Queue Management ---
-
     # System selection with availability check
     st.subheader("Select System to Use")
-
     # Filter out systems that are already in use by other users
     available_systems = []
     unavailable_systems = []
@@ -288,7 +309,6 @@ def main_app():
         else:
             # System is available (free for anyone to claim)
             available_systems.append(system)
-
     # Determine selected system - Allow selection from available systems regardless of queue status
     selected_system = None
     if available_systems:
@@ -297,10 +317,8 @@ def main_app():
              st.info(f"You are currently #{user_queue_position} in the queue, but you can still claim an available system below.")
         elif user_queue_position == 0: # Handle edge case for position 1
              st.info(f"You are currently #1 in the queue, but you can still claim an available system below.")
-
         # Allow user to select any available system
         selected_system = st.selectbox("Available Systems", available_systems)
-
     else:
         st.warning("No systems are currently available")
         # Offer to join queue if not already in it
@@ -319,7 +337,6 @@ def main_app():
                      else:
                           st.error("Please enter a reason.")
         # selected_system remains None
-
     # Show unavailable systems with timers (unchanged)
     if unavailable_systems:
         st.subheader("Unavailable Systems")
@@ -339,14 +356,12 @@ def main_app():
                     st.info(f"🖥️ {system} is being used by **{user_info['username']}**{reason_display}")
             else:
                 st.info(f"🖥️ {system} is being used by **{user_info['username']}**{reason_display}")
-
     # Process selected system (if any) - Main logic change here
     if selected_system:
         # Check current status for selected system
         user_active = selected_system in system_users and system_users[selected_system]['email'] == user_email
         system_in_use_by_user = user_active
         system_in_use_by_other = selected_system in system_users and system_users[selected_system]['username'] != username
-
         # Show timer for user's active session (if active)
         if user_active:
             user_session = system_users[selected_system]
@@ -395,7 +410,6 @@ def main_app():
                     st.success(f"✅ You are using {selected_system}{reason_display}")
             else:
                 st.success(f"✅ You are using {selected_system}{reason_display}")
-
         # Toggle button / Session control logic
         st.subheader("Usage Status")
         if system_in_use_by_other:
@@ -411,13 +425,11 @@ def main_app():
                 key="status_toggle",
                 horizontal=True
             )
-
         # Handle status change
         if status == "Active" and not user_active and not system_in_use_by_other:
             # --- Key Change: Unified "Claim/Start" Logic for Free Systems ---
             # Check if the user is currently in the queue
             is_user_in_queue = user_queue_position > -1
-
             # Common elements for starting a session
             st.subheader("Planned Usage Duration")
             duration_options = {
@@ -432,10 +444,8 @@ def main_app():
                 index=3  # Default to 1 hour
             )
             planned_duration = duration_options[selected_duration_label]
-
             st.subheader("Reason for Usage")
             usage_reason = ""
-
             # Pre-fill reason if claiming from queue
             if is_user_in_queue:
                 # Simple way to get the reason from the queue for pre-filling
@@ -453,7 +463,6 @@ def main_app():
             else:
                 usage_reason = st.text_area("Briefly explain why you need this system:", key="usage_reason_new", placeholder="Please specify why you need access...")
                 action_button_label = "Start Session"
-
             # Action button (either Start or Claim)
             if st.button(action_button_label):
                 if usage_reason.strip(): # Require reason
@@ -483,13 +492,11 @@ def main_app():
                             success = True
                         else:
                             st.error("Failed to start session")
-
                     if success:
                         # Refresh the app state to reflect changes
                         st.rerun()
                 else:
                     st.error("Please enter a reason for using the system.")
-
         elif status == "Inactive" and user_active:
             if st.button("End Session"):
                 if end_session(connection, user_email, selected_system):
@@ -498,13 +505,13 @@ def main_app():
                     st.rerun()
                 else:
                     st.error("Failed to end session")
-
     # --- Display current status and history (existing logic, potentially modified for reason) ---
     # ... (rest of the code like status display and history remains the same) ...
     st.subheader("Current System Status")
     if active_sessions:
         enhanced_sessions = []
-        now = datetime.now()
+        # --- Change 9: Use IST for 'now' calculation ---
+        now = datetime.now(IST_TZ)
         for session in active_sessions:
             # session now includes 'reason' at index 5
             start_time = session[3]
@@ -515,9 +522,15 @@ def main_app():
             status_text = "Active"
             if start_time:
                 try:
-                    active_since_td = now - start_time
+                    # Ensure start_time is treated as IST for calculation
+                    if start_time.tzinfo is None:
+                        start_time_ist = IST_TZ.localize(start_time)
+                    else:
+                        start_time_ist = start_time
+                    active_since_td = now - start_time_ist
                     active_since = format_duration(active_since_td)
-                except:
+                except Exception as e:
+                    st.warning(f"Error calculating active since: {e}")
                     active_since = "0m 0s"
             if start_time and planned_duration:
                 time_remaining = get_time_remaining(start_time, planned_duration)
@@ -538,10 +551,10 @@ def main_app():
             "User", "Email", "System IP", "Start Time", "Planned Duration", "Reason", "Active Since", "Status", "Time Remaining" # Add Reason if displayed
         ])
         # Display DataFrame, optionally including the Reason column
-        st.dataframe(status_df[["User", "System IP", "Active Since", "Status", "Planned Duration", "Time Remaining"]]) # Add "Reason" column here if desired
+        # --- Change 10: Consider displaying the raw datetime which is now in IST ---
+        st.dataframe(status_df[["User", "System IP", "Start Time", "Active Since", "Status", "Planned Duration", "Time Remaining"]]) # Add "Reason" column here if desired, also showing Start Time
     else:
         st.info("No active sessions")
-
     st.subheader("Recent Usage History")
     history = get_usage_history(connection)
     if history:
@@ -549,26 +562,21 @@ def main_app():
             "User", "Email", "System IP", "Start Time", "End Time", "Actual Duration (min)", "Planned Duration (min)", "Reason" # Add Reason
         ])
         # Optionally display Reason column in dataframe
-        st.dataframe(history_df[["User", "System IP", "Start Time", "End Time", "Actual Duration (min)", "Planned Duration (min)", "Reason"]]) # Include Reason
+        # --- Change 11: Consider displaying the raw datetime which is now in IST ---
+        st.dataframe(history_df[["User", "System IP", "Start Time", "End Time", "Actual Duration (min)", "Planned Duration (min)", "Reason"]]) # Include Reason, also showing Start/End Time
     else:
         st.info("No usage history found")
-
 # ... (login_screen, run_app, and if __name__ == "__main__" remain the same) ...
-
-
-
 # Login screen
 def login_screen():
     st.header("🔒 System Usage Tracker")
     st.subheader("Please log in with Google to continue")
     if st.button("Log in with Google", type="primary"):
         st.login(provider="google")
-
 # Main application logic
 def run_app():
     # Initialize database (ensures tables are created)
-    init_db()
-
+    init_db() # This now sets the DB connection timezone
     # Check if user is authenticated
     if (hasattr(st, 'user') and
             hasattr(st.user, 'email') and
@@ -585,11 +593,9 @@ def run_app():
     else:
         # Show login screen
         login_screen()
-
 # Initialize session state keys if they don't exist
 if 'user_info' not in st.session_state:
     st.session_state.user_info = None
-
 # Run the app
 if __name__ == "__main__":
     run_app()
