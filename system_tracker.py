@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 # Database configuration
 DB_CONFIG = {
-    'host': '172.27.131.163',
+    'host': '15.235.85.189',
     'user': 'root',
     'password': 'actowiz',
     'database': 'system_usage',
