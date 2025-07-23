@@ -79,6 +79,9 @@ def send_slack_notification(message,mention_type):
         if response.status_code != 200:
             st.warning(
                 f"Slack notification might have failed. Status code: {response.status_code}, Response: {response.text}")
+        # If your webhook returns JSON indicating success/failure, you can check response.json() here
+        # else:
+        #     st.success("Slack notification sent successfully.") # Optional confirmation
 
     except Exception as e:
         st.error(f"Failed to send Slack notification: {e}")
@@ -150,7 +153,6 @@ def end_session(connection, email, system_ip):
                 message_notify = f"<@{next_email}> or <{next_username}>, the system `{system_ip}` is now free! You are next in the queue."
                 # If your webhook requires a specific format for user mentions, adjust the message accordingly.
                 send_slack_notification(message_notify,"channel")
-
         return True
     except Exception as e:
         st.error(f"Error ending session: {e}")
@@ -419,17 +421,56 @@ def main_app():
             planned_duration = user_info['planned_duration']
             reason = user_info.get('reason', '') # Get reason for display
             reason_display = f" (Reason: {reason})" if reason else ""
+            # if start_time and planned_duration:
+            #     time_remaining = get_time_remaining(start_time, planned_duration)
+            #     overdue = is_session_overdue(start_time, planned_duration)
+            #     if overdue:
+            #         st.warning(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ Time exceeded){reason_display}")
+            #     elif time_remaining is not None:
+            #         st.info(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ {time_remaining} min left){reason_display}")
+            #     else:
+            #         st.info(f"🖥️ {system} is being used by **{user_info['username']}**{reason_display}")
+            # else:
+            #     st.info(f"🖥️ {system} is being used by **{user_info['username']}**{reason_display}")
             if start_time and planned_duration:
                 time_remaining = get_time_remaining(start_time, planned_duration)
                 overdue = is_session_overdue(start_time, planned_duration)
                 if overdue:
-                    st.warning(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ Time exceeded){reason_display}")
+                    st.warning(
+                        f"🖥️ {system} is being used by **{user_info['username']}** (⏰ Time exceeded){reason_display}")
+                    # --- Add Slack Notification for Overdue (Other Users) ---
+                    # Create a unique key for this specific system/user overdue event
+                    overdue_key = f"{system}_{user_info['email']}"
+                    if overdue_key not in st.session_state.overdue_notifications_sent:
+                        # Format the message
+                        message = f"⚠️ *Session Overdue* | User: `{user_info['username']}` (`{user_info['email']}`) | IP: `{system}` | Reason: `{reason}`"
+                        send_slack_notification(message,"channel")
+                        # Mark this notification as sent to avoid repeated messages
+                        st.session_state.overdue_notifications_sent.add(overdue_key)
+                    # --- End Slack Notification ---
                 elif time_remaining is not None:
-                    st.info(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ {time_remaining} min left){reason_display}")
+                    st.info(
+                        f"🖥️ {system} is being used by **{user_info['username']}** (⏰ {time_remaining} min left){reason_display}")
+                    # --- Optional: Clear notification flag if session is no longer overdue ---
+                    # This handles the case where time is extended or session ends, then becomes overdue again.
+                    overdue_key = f"{system}_{user_info['email']}"
+                    if overdue_key in st.session_state.overdue_notifications_sent:
+                        st.session_state.overdue_notifications_sent.discard(overdue_key)
+                    # --- End Optional Clear ---
                 else:
                     st.info(f"🖥️ {system} is being used by **{user_info['username']}**{reason_display}")
+                    # --- Optional: Clear notification flag if conditions change ---
+                    overdue_key = f"{system}_{user_info['email']}"
+                    if overdue_key in st.session_state.overdue_notifications_sent:
+                        st.session_state.overdue_notifications_sent.discard(overdue_key)
+                    # --- End Optional Clear ---
             else:
                 st.info(f"🖥️ {system} is being used by **{user_info['username']}**{reason_display}")
+                # --- Optional: Clear notification flag if start_time/planned_duration missing ---
+                overdue_key = f"{system}_{user_info['email']}"
+                if overdue_key in st.session_state.overdue_notifications_sent:
+                    st.session_state.overdue_notifications_sent.discard(overdue_key)
+                # --- End Optional Clear ---
     # Process selected system (if any) - Main logic change here
     if selected_system:
         # Check current status for selected system
