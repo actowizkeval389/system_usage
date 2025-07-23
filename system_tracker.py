@@ -2,7 +2,6 @@ import streamlit as st
 import pymysql
 import pandas as pd
 from datetime import datetime, timedelta
-import requests
 import pytz
 
 # Database configuration
@@ -60,31 +59,7 @@ def init_db():
         return None
 
 
-def send_slack_notification(message,mention_type):
-    """
-    Sends a message to the configured Slack channel.
-    """
-    if not SLACK_WEBHOOK_URL:
-        st.warning("Slack webhook URL not configured. Skipping notification.")
-        return
 
-    try:
-        json_data = {
-            'message': message,
-            'mention_type': mention_type,  # Or 'here', 'everyone', or specific user IDs
-        }
-        response = requests.post(SLACK_WEBHOOK_URL, headers=HEADERS, json=json_data)
-
-        # Check if the request was successful (optional, depends on your webhook's response)
-        if response.status_code != 200:
-            st.warning(
-                f"Slack notification might have failed. Status code: {response.status_code}, Response: {response.text}")
-        # If your webhook returns JSON indicating success/failure, you can check response.json() here
-        # else:
-        #     st.success("Slack notification sent successfully.") # Optional confirmation
-
-    except Exception as e:
-        st.error(f"Failed to send Slack notification: {e}")
 
 
 # --- Existing Functions (potentially modified) ---
@@ -115,8 +90,7 @@ def start_session(connection, username, email, system_ip, planned_duration, reas
             """, (username, email, system_ip, ist_now, planned_duration, reason))
         connection.commit()
 
-        message = f"🟢 *System Connected* | User: `{username}` | IP: `{system_ip}` | Duration: `{planned_duration} min` | Reason: `{reason}`"
-        # send_slack_notification(message,"channel")
+
         return True
     except Exception as e:
         st.error(f"Error starting session: {e}")
