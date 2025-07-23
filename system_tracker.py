@@ -425,7 +425,7 @@ def main_app():
                 time_remaining = get_time_remaining(start_time, planned_duration)
                 overdue = is_session_overdue(start_time, planned_duration)
                 if overdue:
-                    # send_slack_notification(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ Time exceeded){reason_display}")
+                    send_slack_notification(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ Time exceeded){reason_display}","channel")
                     st.warning(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ Time exceeded){reason_display}")
                 elif time_remaining is not None:
                     st.info(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ {time_remaining} min left){reason_display}")
