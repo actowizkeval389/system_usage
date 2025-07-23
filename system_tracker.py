@@ -3,8 +3,6 @@ import pymysql
 import pandas as pd
 from datetime import datetime, timedelta
 import pytz
-import requests # Required for Slack notifications (if used)
-import json   # Required for Slack notifications (if used)
 
 # Database configuration
 DB_CONFIG = {
@@ -15,29 +13,12 @@ DB_CONFIG = {
     'charset': 'utf8mb4'
 }
 
-# Slack Notification Configuration (Uncomment and configure if needed)
-# SLACK_WEBHOOK_URL = 'http://51.222.244.92:8904/send_message' # Your webhook URL
-# HEADERS = {'Content-Type': 'application/json'}
+# Slack Notification Configuration
+SLACK_WEBHOOK_URL = 'http://51.222.244.92:8904/send_message' # Your webhook URL
+HEADERS = {'Content-Type': 'application/json'}
 
 # --- Change 2: Define IST timezone ---
 IST_TZ = pytz.timezone('Asia/Kolkata')
-
-# --- Helper function for Slack notifications (Uncomment if needed) ---
-# def send_slack_notification(message, channel_type="channel"):
-#     """Sends a notification to Slack."""
-#     if not SLACK_WEBHOOK_URL:
-#         st.warning("Slack webhook URL not configured.")
-#         return
-#     try:
-#         payload = {
-#             "text": message,
-#             "type": channel_type
-#         }
-#         response = requests.post(SLACK_WEBHOOK_URL, headers=HEADERS, data=json.dumps(payload))
-#         if response.status_code != 200:
-#             st.warning(f"Slack notification failed (Status: {response.status_code})")
-#     except Exception as e:
-#         st.warning(f"Error sending Slack notification: {e}")
 
 # Initialize database connection
 def init_db():
@@ -46,7 +27,6 @@ def init_db():
         with connection.cursor() as cursor:
             # --- Change 3: Set MySQL session timezone to IST ---
             cursor.execute("SET time_zone = '+05:30'")
-
             # Create usage_log table with reason column
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS usage_log (
@@ -61,8 +41,7 @@ def init_db():
                     reason TEXT -- Add column for reason
                 )
             """)
-
-            # Create usage_queue table (Updated to include preferred_system)
+            # Create usage_queue table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS usage_queue (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -70,32 +49,18 @@ def init_db():
                     email VARCHAR(255) NOT NULL,
                     requested_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, -- This will now be in IST due to session TZ
                     reason TEXT,
-                    preferred_system VARCHAR(255) NULL, -- Add column for preferred system
                     INDEX idx_requested_time (requested_time)
                 )
             """)
-
-            # --- Add preferred_system column if it doesn't exist (for existing tables) ---
-            try:
-                 cursor.execute("""
-                     ALTER TABLE usage_queue
-                     ADD COLUMN preferred_system VARCHAR(255) NULL AFTER reason;
-                 """)
-                 connection.commit()
-                 # st.info("Added 'preferred_system' column to usage_queue table.") # Optional debug info
-            except pymysql.err.OperationalError as e:
-                 if e.args[0] == 1060: # Error code for "Duplicate column name"
-                     pass # Column already exists, ignore
-                 else:
-                     st.error(f"Error adding preferred_system column: {e}")
-            except Exception as e:
-                 st.error(f"Unexpected error adding preferred_system column: {e}")
-
         connection.commit()
         return connection
     except Exception as e:
         st.error(f"Database connection failed: {e}")
         return None
+
+
+
+
 
 # --- Existing Functions (potentially modified) ---
 def get_active_sessions(connection):
@@ -124,6 +89,8 @@ def start_session(connection, username, email, system_ip, planned_duration, reas
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (username, email, system_ip, ist_now, planned_duration, reason))
         connection.commit()
+
+
         return True
     except Exception as e:
         st.error(f"Error starting session: {e}")
@@ -145,20 +112,26 @@ def end_session(connection, email, system_ip):
         # --- Add Slack Notification Logic ---
         if cursor.rowcount > 0:  # Check if an update actually happened
             # 1. Notify that the system is now free
+            # You might want to fetch the username for a more detailed message
+            # For now, we know the email and IP
             message_free = f"🔵 *System Disconnected* | IP: `{system_ip}` is now *free*."
-            # send_slack_notification(message_free,"channel") # Uncomment if Slack is configured
+            # send_slack_notification(message_free,"channel")
 
             # 2. Check if someone is in the queue and notify them
             next_user_info = get_next_user_in_queue(connection)
             if next_user_info:
-                next_username, next_email, next_preferred_system = next_user_info # Unpack preferred_system
-                # Example message (adjust tagging as needed for your Slack setup)
+                next_username, next_email = next_user_info
+                # Format message to tag the user (assuming email maps to Slack user ID or they have notifications set up for mentions)
+                # If your webhook supports tagging by email/user_id, use that. Otherwise, just mention the name/email.
+                # Example using plain text mention (Slack often highlights names/emails):
                 message_notify = f"<@{next_email}> or <{next_username}>, the system `{system_ip}` is now free! You are next in the queue."
-                # send_slack_notification(message_notify,"channel") # Uncomment if Slack is configured
+                # If your webhook requires a specific format for user mentions, adjust the message accordingly.
+                # send_slack_notification(message_notify,"channel")
         return True
     except Exception as e:
         st.error(f"Error ending session: {e}")
         return False
+
 
 def get_usage_history(connection):
     try:
@@ -175,30 +148,31 @@ def get_usage_history(connection):
         st.error(f"Error fetching history: {e}")
         return []
 
-# Updated function to accept preferred_system
-def add_to_queue(connection, username, email, reason, preferred_system=None):
+# The DEFAULT CURRENT_TIMESTAMP in the table definition will now use IST because of the session timezone.
+# If you explicitly wanted to pass it (though not necessary with DEFAULT), you would use ist_now = datetime.now(IST_TZ)
+
+def add_to_queue(connection, username, email, reason):
     """Adds a user request to the queue."""
     try:
         # Note: requested_time uses DEFAULT CURRENT_TIMESTAMP which is now IST due to session TZ
         with connection.cursor() as cursor:
             cursor.execute("""
-                INSERT INTO usage_queue (username, email, reason, preferred_system) -- Include preferred_system
-                VALUES (%s, %s, %s, %s)
-            """, (username, email, reason, preferred_system)) # Pass preferred_system
+                INSERT INTO usage_queue (username, email, reason) -- requested_time defaults to CURRENT_TIMESTAMP (IST)
+                VALUES (%s, %s, %s)
+            """, (username, email, reason))
         connection.commit()
         return True
     except Exception as e:
         st.error(f"Error adding to queue: {e}")
         return False
 
-# Updated function to fetch preferred_system
+
 def get_queue(connection):
     """Retrieves the current queue, ordered by request time."""
     try:
         with connection.cursor() as cursor:
-            # Add preferred_system to SELECT list
             cursor.execute("""
-                SELECT username, email, requested_time, reason, preferred_system
+                SELECT username, email, requested_time, reason
                 FROM usage_queue
                 ORDER BY requested_time ASC
             """)
@@ -206,6 +180,7 @@ def get_queue(connection):
     except Exception as e:
         st.error(f"Error fetching queue: {e}")
         return []
+
 
 def remove_from_queue(connection, email):
     """Removes a user from the queue."""
@@ -220,6 +195,7 @@ def remove_from_queue(connection, email):
     except Exception as e:
         st.error(f"Error removing from queue: {e}")
         return False
+
 
 def get_user_queue_position(connection, email):
     """Gets the position of a user in the queue (1-based index). Returns -1 if not in queue."""
@@ -242,23 +218,22 @@ def get_user_queue_position(connection, email):
          st.error(f"Error getting queue position: {e}")
          return -1
 
-# Updated function to fetch preferred_system
+
 def get_next_user_in_queue(connection):
     """
-    Retrieves the username, email, and preferred_system of the user at the front of the queue.
-    Returns a tuple (username, email, preferred_system) or None if queue is empty.
+    Retrieves the username and email of the user at the front of the queue.
+    Returns a tuple (username, email) or None if queue is empty.
     """
     try:
         with connection.cursor() as cursor:
-            # Add preferred_system to SELECT list
             cursor.execute("""
-                SELECT username, email, preferred_system
+                SELECT username, email
                 FROM usage_queue
                 ORDER BY requested_time ASC
                 LIMIT 1
             """)
             result = cursor.fetchone()
-            return result # Returns (username, email, preferred_system) tuple or None
+            return result # Returns (username, email) tuple or None
     except Exception as e:
         st.error(f"Error fetching next user from queue: {e}")
         return None
@@ -290,6 +265,7 @@ def is_session_overdue(start_time, planned_duration):
     now_ist = datetime.now(IST_TZ)
     return now_ist > end_time
 
+
 def format_duration(td):
     if td is None:
         return "0m 0s"
@@ -310,26 +286,21 @@ def main_app():
     connection = init_db()
     if not connection:
         st.stop()
-
     # System options
     SYSTEMS = [
         "172.27.131.163",
         "172.27.131.164",
         "172.27.131.165"
     ]
-
     # Get user info from authentication
     user_info = st.session_state.get('user_info', {})
     username = user_info.get('name', 'Unknown User')
     user_email = user_info.get('email', '')
-
     # Header with user info
     st.title(f"Welcome, {username}!")
     st.markdown("---")
-
     # Get active sessions
     active_sessions = get_active_sessions(connection)
-
     # Create a dictionary of systems and their current users
     system_users = {session[2]: {
         'username': session[0],
@@ -338,13 +309,10 @@ def main_app():
         'planned_duration': session[4],
         'reason': session[5] # Add reason to system_users dict
     } for session in active_sessions}
-
     # --- Queue Management ---
     st.subheader("Queue Status")
-
     # Check if user is already in the queue
     user_queue_position = get_user_queue_position(connection, user_email)
-
     # Show user's queue position
     if user_queue_position > 0:
         st.info(f"You are currently #{user_queue_position} in the queue.")
@@ -366,23 +334,17 @@ def main_app():
             else:
                 st.error("Failed to remove you from the queue.")
         # --- End Change 1 ---
-
-    # Show the queue list (Updated to display preferred system)
+    # Show the queue list
     queue_list = get_queue(connection)
     if queue_list:
-        # Update DataFrame columns to include preferred_system
-        queue_df = pd.DataFrame(queue_list, columns=["User", "Email", "Requested Time", "Reason", "Preferred System"])
-        # Display DataFrame, showing Preferred System
-        st.dataframe(queue_df[["User", "Requested Time", "Reason", "Preferred System"]])
+        queue_df = pd.DataFrame(queue_list, columns=["User", "Email", "Requested Time", "Reason"])
+        st.dataframe(queue_df[["User", "Requested Time", "Reason"]])
     else:
         st.write("No one is currently in the queue.")
-
     st.markdown("---")
     # --- End Queue Management ---
-
     # System selection with availability check
     st.subheader("Select System to Use")
-
     # Filter out systems that are already in use by other users
     available_systems = []
     unavailable_systems = []
@@ -397,7 +359,6 @@ def main_app():
         else:
             # System is available (free for anyone to claim)
             available_systems.append(system)
-
     # Determine selected system - Allow selection from available systems regardless of queue status
     selected_system = None
     if available_systems:
@@ -406,61 +367,19 @@ def main_app():
              st.info(f"You are currently #{user_queue_position} in the queue, but you can still claim an available system below.")
         elif user_queue_position == 0: # Handle edge case for position 1
              st.info(f"You are currently #1 in the queue, but you can still claim an available system below.")
-
         # Allow user to select any available system
         selected_system = st.selectbox("Available Systems", available_systems)
-
-        # --- Add Explicit Queue Option when systems are available ---
-        # Show queue join option even if systems are free (Updated with system selection)
-        if available_systems and user_queue_position == -1: # Only show if user is NOT already in queue
-            st.subheader("Or Join Queue")
-            with st.form("queue_form_systems_available"):
-                queue_reason_avail = st.text_area("Enter reason for needing a system:", key="queue_reason_avail", placeholder="Please specify why you need access...")
-                # Options: Specific available systems or "Any"
-                available_system_options = [s for s in SYSTEMS if s in available_systems] + ["Any"]
-                selected_system_for_queue_avail = st.selectbox(
-                    "Preferred System (optional):",
-                    options=available_system_options,
-                    index=len(available_system_options) - 1, # Default to "Any"
-                    key="preferred_system_avail"
-                )
-                submitted_to_queue_avail = st.form_submit_button("Join Queue")
-                if submitted_to_queue_avail:
-                    if queue_reason_avail.strip():
-                        # Determine the value to store for preferred_system
-                        preferred_sys_value_avail = selected_system_for_queue_avail if selected_system_for_queue_avail != "Any" else None
-                        if add_to_queue(connection, username, user_email, queue_reason_avail.strip(), preferred_sys_value_avail): # Pass preferred_system
-                            st.success("Added to the queue!")
-                            st.rerun() # Refresh to show updated queue position
-                        else:
-                            st.error("Failed to join the queue.")
-                    else:
-                        st.error("Please enter a reason.")
-        # --- End Add Explicit Queue Option ---
-
     else:
         st.warning("No systems are currently available")
-        # Offer to join queue if not already in it (Updated with system selection)
+        # Offer to join queue if not already in it
         if user_queue_position == -1:
             st.subheader("Join Queue")
             with st.form("queue_form_all_busy"):
                  queue_reason_all = st.text_area("Enter reason for needing a system:", key="queue_reason_all", placeholder="Please specify why you need access...")
-                 # --- Add System Selection ---
-                 # Options: Specific systems or "Any"
-                 system_options = SYSTEMS + ["Any"]
-                 selected_system_for_queue = st.selectbox(
-                     "Preferred System (optional):",
-                     options=system_options,
-                     index=len(system_options) - 1, # Default to "Any"
-                     key="preferred_system_all_busy"
-                 )
-                 # --- End Add System Selection ---
                  submitted_to_queue_all = st.form_submit_button("Join Queue")
                  if submitted_to_queue_all:
                      if queue_reason_all.strip():
-                         # Determine the value to store for preferred_system
-                         preferred_sys_value = selected_system_for_queue if selected_system_for_queue != "Any" else None
-                         if add_to_queue(connection, username, user_email, queue_reason_all.strip(), preferred_sys_value): # Pass preferred_system
+                         if add_to_queue(connection, username, user_email, queue_reason_all.strip()):
                              st.success("Added to the queue!")
                              st.rerun() # Refresh to show updated queue position
                          else:
@@ -468,7 +387,6 @@ def main_app():
                      else:
                           st.error("Please enter a reason.")
         # selected_system remains None
-
     # Show unavailable systems with timers (unchanged)
     if unavailable_systems:
         st.subheader("Unavailable Systems")
@@ -496,7 +414,6 @@ def main_app():
         user_active = selected_system in system_users and system_users[selected_system]['email'] == user_email
         system_in_use_by_user = user_active
         system_in_use_by_other = selected_system in system_users and system_users[selected_system]['username'] != username
-
         # Show timer for user's active session (if active)
         if user_active:
             user_session = system_users[selected_system]
@@ -545,7 +462,6 @@ def main_app():
                     st.success(f"✅ You are using {selected_system}{reason_display}")
             else:
                 st.success(f"✅ You are using {selected_system}{reason_display}")
-
         # Toggle button / Session control logic
         st.subheader("Usage Status")
         if system_in_use_by_other:
@@ -561,13 +477,11 @@ def main_app():
                 key="status_toggle",
                 horizontal=True
             )
-
         # Handle status change
         if status == "Active" and not user_active and not system_in_use_by_other:
             # --- Key Change: Unified "Claim/Start" Logic for Free Systems ---
             # Check if the user is currently in the queue
             is_user_in_queue = user_queue_position > -1
-
             # Common elements for starting a session
             st.subheader("Planned Usage Duration")
             duration_options = {
@@ -582,10 +496,8 @@ def main_app():
                 index=3  # Default to 1 hour
             )
             planned_duration = duration_options[selected_duration_label]
-
             st.subheader("Reason for Usage")
             usage_reason = ""
-
             # Pre-fill reason if claiming from queue
             if is_user_in_queue:
                 # Simple way to get the reason from the queue for pre-filling
@@ -598,13 +510,11 @@ def main_app():
                             queue_reason_for_claim = queue_reason_result[0]
                 except Exception as e:
                     st.warning(f"Could not fetch queue reason: {e}") # Log or handle error fetching reason
-
                 usage_reason = st.text_area("Briefly explain why you need this system:", value=queue_reason_for_claim, key="usage_reason_claim_or_new")
                 action_button_label = "Claim System and Start Session"
             else:
                 usage_reason = st.text_area("Briefly explain why you need this system:", key="usage_reason_new", placeholder="Please specify why you need access...")
                 action_button_label = "Start Session"
-
             # Action button (either Start or Claim)
             if st.button(action_button_label):
                 if usage_reason.strip(): # Require reason
@@ -634,13 +544,11 @@ def main_app():
                             success = True
                         else:
                             st.error("Failed to start session")
-
                     if success:
                         # Refresh the app state to reflect changes
                         st.rerun()
                 else:
                     st.error("Please enter a reason for using the system.")
-
         elif status == "Inactive" and user_active:
             if st.button("End Session"):
                 if end_session(connection, user_email, selected_system):
@@ -649,10 +557,8 @@ def main_app():
                     st.rerun()
                 else:
                     st.error("Failed to end session")
-
     # --- Display current status and history (existing logic, potentially modified for reason) ---
     # ... (rest of the code like status display and history remains the same) ...
-
     st.subheader("Current System Status")
     if active_sessions:
         enhanced_sessions = []
@@ -693,7 +599,6 @@ def main_app():
             # Optionally add reason to display in table
             # enhanced_session.append(reason) # index 9
             enhanced_sessions.append(enhanced_session)
-
         status_df = pd.DataFrame(enhanced_sessions, columns=[
             "User", "Email", "System IP", "Start Time", "Planned Duration", "Reason", "Active Since", "Status", "Time Remaining" # Add Reason if displayed
         ])
@@ -702,7 +607,6 @@ def main_app():
         st.dataframe(status_df[["User", "System IP", "Start Time", "Active Since", "Status", "Planned Duration", "Time Remaining"]]) # Add "Reason" column here if desired, also showing Start Time
     else:
         st.info("No active sessions")
-
     st.subheader("Recent Usage History")
     history = get_usage_history(connection)
     if history:
@@ -726,7 +630,6 @@ def login_screen():
 def run_app():
     # Initialize database (ensures tables are created)
     init_db() # This now sets the DB connection timezone
-
     # Check if user is authenticated
     if (hasattr(st, 'user') and
             hasattr(st.user, 'email') and
@@ -743,11 +646,10 @@ def run_app():
     else:
         # Show login screen
         login_screen()
-
 # Initialize session state keys if they don't exist
+
 if 'user_info' not in st.session_state:
     st.session_state.user_info = None
-
 # Run the app
 if __name__ == "__main__":
     run_app()
