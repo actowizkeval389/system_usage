@@ -159,7 +159,6 @@ def get_user_queue_position(connection, email):
              if not user_time_result:
                  return -1 # Not in queue
              user_request_time = user_time_result[0]
-
              # Count how many entries are older than the user's request time
              cursor.execute("SELECT COUNT(*) FROM usage_queue WHERE requested_time < %s", (user_request_time,))
              position_result = cursor.fetchone()
@@ -240,7 +239,6 @@ def main_app():
     st.subheader("Queue Status")
     # Check if user is already in the queue
     user_queue_position = get_user_queue_position(connection, user_email)
-
     # Show user's queue position
     if user_queue_position > 0:
         st.info(f"You are currently #{user_queue_position} in the queue.")
@@ -254,7 +252,6 @@ def main_app():
         st.dataframe(queue_df[["User", "Requested Time", "Reason"]])
     else:
         st.write("No one is currently in the queue.")
-
     st.markdown("---")
     # --- End Queue Management ---
 
@@ -273,18 +270,21 @@ def main_app():
                 # Another user is using this system
                 unavailable_systems.append((system, system_users[system]))
         else:
-            # System is available
+            # System is available (free for anyone to claim)
             available_systems.append(system)
 
-    # Determine selected system
+    # Determine selected system - Allow selection from available systems regardless of queue status
     selected_system = None
     if available_systems:
-        # If user is in queue, don't let them select a system directly
-        if user_queue_position == -1: # Not in queue
-            selected_system = st.selectbox("Available Systems", available_systems)
-        else:
-             st.info("You are in the queue. Please wait for a system to become available.")
-             # Don't show selectbox, selected_system remains None
+        # Show queue position reminder if user is in queue
+        if user_queue_position > 0:
+             st.info(f"You are currently #{user_queue_position} in the queue, but you can still claim an available system below.")
+        elif user_queue_position == 0: # Handle edge case for position 1
+             st.info(f"You are currently #1 in the queue, but you can still claim an available system below.")
+
+        # Allow user to select any available system
+        selected_system = st.selectbox("Available Systems", available_systems)
+
     else:
         st.warning("No systems are currently available")
         # Offer to join queue if not already in it
@@ -297,14 +297,14 @@ def main_app():
                      if queue_reason_all.strip():
                          if add_to_queue(connection, username, user_email, queue_reason_all.strip()):
                              st.success("Added to the queue!")
-                             st.rerun()
+                             st.rerun() # Refresh to show updated queue position
                          else:
                              st.error("Failed to join the queue.")
                      else:
                           st.error("Please enter a reason.")
         # selected_system remains None
 
-    # Show unavailable systems with timers
+    # Show unavailable systems with timers (unchanged)
     if unavailable_systems:
         st.subheader("Unavailable Systems")
         for system, user_info in unavailable_systems:
@@ -324,17 +324,14 @@ def main_app():
             else:
                 st.info(f"🖥️ {system} is being used by **{user_info['username']}**{reason_display}")
 
-    # Stop processing if no system selected or user is in queue
-    if not selected_system or user_queue_position > -1:
-        # Proceed to show current status and history even if no system selected or user is queued
-        pass
-    else:
-        # Check current status for selected system (existing logic)
+    # Process selected system (if any) - Main logic change here
+    if selected_system:
+        # Check current status for selected system
         user_active = selected_system in system_users and system_users[selected_system]['email'] == user_email
         system_in_use_by_user = user_active
         system_in_use_by_other = selected_system in system_users and system_users[selected_system]['username'] != username
 
-        # Show timer for user's active session (existing logic)
+        # Show timer for user's active session (if active)
         if user_active:
             user_session = system_users[selected_system]
             start_time = user_session['start_time']
@@ -353,97 +350,99 @@ def main_app():
             else:
                 st.success(f"✅ You are using {selected_system}{reason_display}")
 
-        # Toggle button (existing logic)
+        # Toggle button / Session control logic
         st.subheader("Usage Status")
         if system_in_use_by_other:
             st.warning(f"This system is currently being used by {system_users[selected_system]['username']}")
-            status = "Inactive"
+            status = "Inactive" # Cannot change status if in use by someone else
         else:
+            # Determine default status for radio button
+            default_status_index = 1 if user_active else 0
             status = st.radio(
                 f"Mark {selected_system} as:",
                 ["Inactive", "Active"],
-                index=1 if user_active else 0,
+                index=default_status_index,
                 key="status_toggle",
                 horizontal=True
             )
 
         # Handle status change
         if status == "Active" and not user_active and not system_in_use_by_other:
-            # Check if user was in queue and wants to claim this now-free system
-            was_in_queue = user_queue_position > -1
-            if was_in_queue:
-                st.info("You were in the queue. Claim this system now?")
-                # Allow updating reason even if claiming from queue
-                st.subheader("Planned Usage Duration")
-                duration_options = {
-                    "15 minutes": 15,
-                    "30 minutes": 30,
-                    "45 minutes": 45,
-                    "1 hour": 60
-                }
-                selected_duration_label = st.selectbox(
-                    "Select planned duration:",
-                    list(duration_options.keys()),
-                    index=3  # Default to 1 hour (last option)
-                )
-                planned_duration = duration_options[selected_duration_label]
+            # --- Key Change: Unified "Claim/Start" Logic for Free Systems ---
+            # Check if the user is currently in the queue
+            is_user_in_queue = user_queue_position > -1
 
-                st.subheader("Reason for Usage")
-                # Pre-fill reason from queue or allow editing
+            # Common elements for starting a session
+            st.subheader("Planned Usage Duration")
+            duration_options = {
+                "15 minutes": 15,
+                "30 minutes": 30,
+                "45 minutes": 45,
+                "1 hour": 60
+            }
+            selected_duration_label = st.selectbox(
+                "Select planned duration:",
+                list(duration_options.keys()),
+                index=3  # Default to 1 hour
+            )
+            planned_duration = duration_options[selected_duration_label]
+
+            st.subheader("Reason for Usage")
+            usage_reason = ""
+
+            # Pre-fill reason if claiming from queue
+            if is_user_in_queue:
+                # Simple way to get the reason from the queue for pre-filling
                 queue_reason_for_claim = ""
-                # Simple way to get the reason from the queue for pre-filling (requires another DB call or passing it)
-                # Let's fetch it quickly for pre-fill
                 try:
                     with connection.cursor() as cursor:
                         cursor.execute("SELECT reason FROM usage_queue WHERE email = %s", (user_email,))
                         queue_reason_result = cursor.fetchone()
                         if queue_reason_result:
                             queue_reason_for_claim = queue_reason_result[0]
-                except:
-                    pass # Ignore if can't fetch
-                usage_reason = st.text_area("Briefly explain why you need this system:", value=queue_reason_for_claim, key="usage_reason_claim")
-
-                if st.button("Claim System and Start Session"):
-                    # 1. Remove user from queue
-                    remove_from_queue(connection, user_email)
-                    # 2. Start the session
-                    if usage_reason.strip(): # Require reason
-                        if start_session(connection, username, user_email, selected_system, planned_duration, usage_reason.strip()): # Pass reason
-                            st.success(f"Claimed {selected_system} and started session ({selected_duration_label}). Removed from queue.")
-                            st.rerun()
-                        else:
-                            # Re-add to queue? Or notify user of failure? For now, just error.
-                            st.error("Failed to start session. You might need to re-join the queue.")
-                    else:
-                        st.error("Please enter a reason for using the system.")
+                except Exception as e:
+                    st.warning(f"Could not fetch queue reason: {e}") # Log or handle error fetching reason
+                usage_reason = st.text_area("Briefly explain why you need this system:", value=queue_reason_for_claim, key="usage_reason_claim_or_new")
+                action_button_label = "Claim System and Start Session"
             else:
-                # Standard start session flow (user wasn't in queue)
-                st.subheader("Planned Usage Duration")
-                duration_options = {
-                    "15 minutes": 15,
-                    "30 minutes": 30,
-                    "45 minutes": 45,
-                    "1 hour": 60
-                }
-                selected_duration_label = st.selectbox(
-                    "Select planned duration:",
-                    list(duration_options.keys()),
-                    index=3  # Default to 1 hour (last option)
-                )
-                planned_duration = duration_options[selected_duration_label]
-
-                st.subheader("Reason for Usage")
                 usage_reason = st.text_area("Briefly explain why you need this system:", key="usage_reason_new", placeholder="Please specify why you need access...")
+                action_button_label = "Start Session"
 
-                if st.button("Start Session"):
-                    if usage_reason.strip(): # Require reason
-                        if start_session(connection, username, user_email, selected_system, planned_duration, usage_reason.strip()): # Pass reason
+            # Action button (either Start or Claim)
+            if st.button(action_button_label):
+                if usage_reason.strip(): # Require reason
+                    success = False
+                    if is_user_in_queue:
+                        # If user is in queue, remove them first, then start session
+                        # Note: Potential race condition if multiple queued users try simultaneously.
+                        # The database constraints or application logic should ideally prevent double booking.
+                        remove_success = remove_from_queue(connection, user_email)
+                        if remove_success:
+                             start_success = start_session(connection, username, user_email, selected_system, planned_duration, usage_reason.strip())
+                             if start_success:
+                                 st.success(f"Claimed {selected_system} and started session ({selected_duration_label}). Removed from queue.")
+                                 success = True
+                             else:
+                                 # Failed to start, try to re-add to queue? Or just notify?
+                                 st.error("Failed to start session after removing from queue. You might need to re-join the queue.")
+                                 # Optional: Re-add to queue if start failed? Requires careful handling.
+                                 # add_to_queue(connection, username, user_email, usage_reason.strip()) # Risky without checks
+                        else:
+                             st.error("Failed to remove you from the queue.")
+                    else:
+                        # Standard start session (user was not in queue)
+                        start_success = start_session(connection, username, user_email, selected_system, planned_duration, usage_reason.strip())
+                        if start_success:
                             st.success(f"Started session for {selected_system} ({selected_duration_label})")
-                            st.rerun()
+                            success = True
                         else:
                             st.error("Failed to start session")
-                    else:
-                        st.error("Please enter a reason for using the system.")
+
+                    if success:
+                        # Refresh the app state to reflect changes
+                        st.rerun()
+                else:
+                    st.error("Please enter a reason for using the system.")
 
         elif status == "Inactive" and user_active:
             if st.button("End Session"):
@@ -488,7 +487,6 @@ def main_app():
             # Optionally add reason to display in table
             # enhanced_session.append(reason) # index 9
             enhanced_sessions.append(enhanced_session)
-
         status_df = pd.DataFrame(enhanced_sessions, columns=[
             "User", "Email", "System IP", "Start Time", "Planned Duration", "Reason", "Active Since", "Status", "Time Remaining" # Add Reason if displayed
         ])
@@ -519,6 +517,7 @@ def login_screen():
 def run_app():
     # Initialize database (ensures tables are created)
     init_db()
+
     # Check if user is authenticated
     if (hasattr(st, 'user') and
             hasattr(st.user, 'email') and
