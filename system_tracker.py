@@ -116,7 +116,7 @@ def start_session(connection, username, email, system_ip, planned_duration, reas
         connection.commit()
 
         message = f"🟢 *System Connected* | User: `{username}` | IP: `{system_ip}` | Duration: `{planned_duration} min` | Reason: `{reason}`"
-        send_slack_notification(message,"channel")
+        # send_slack_notification(message,"channel")
         return True
     except Exception as e:
         st.error(f"Error starting session: {e}")
@@ -141,7 +141,7 @@ def end_session(connection, email, system_ip):
             # You might want to fetch the username for a more detailed message
             # For now, we know the email and IP
             message_free = f"🔵 *System Disconnected* | IP: `{system_ip}` is now *free*."
-            send_slack_notification(message_free,"channel")
+            # send_slack_notification(message_free,"channel")
 
             # 2. Check if someone is in the queue and notify them
             next_user_info = get_next_user_in_queue(connection)
@@ -152,7 +152,7 @@ def end_session(connection, email, system_ip):
                 # Example using plain text mention (Slack often highlights names/emails):
                 message_notify = f"<@{next_email}> or <{next_username}>, the system `{system_ip}` is now free! You are next in the queue."
                 # If your webhook requires a specific format for user mentions, adjust the message accordingly.
-                send_slack_notification(message_notify,"channel")
+                # send_slack_notification(message_notify,"channel")
         return True
     except Exception as e:
         st.error(f"Error ending session: {e}")
@@ -425,7 +425,7 @@ def main_app():
                 time_remaining = get_time_remaining(start_time, planned_duration)
                 overdue = is_session_overdue(start_time, planned_duration)
                 if overdue:
-                    send_slack_notification(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ Time exceeded){reason_display}","channel")
+                    # send_slack_notification(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ Time exceeded){reason_display}","channel")
                     st.warning(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ Time exceeded){reason_display}")
                 elif time_remaining is not None:
                     st.info(f"🖥️ {system} is being used by **{user_info['username']}** (⏰ {time_remaining} min left){reason_display}")
