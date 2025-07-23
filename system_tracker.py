@@ -2,7 +2,7 @@ import streamlit as st
 import pymysql
 import pandas as pd
 from datetime import datetime, timedelta
-# --- Change 1: Import pytz ---
+import requests
 import pytz
 
 # Database configuration
@@ -13,6 +13,10 @@ DB_CONFIG = {
     'database': 'system_usage',
     'charset': 'utf8mb4'
 }
+
+# Slack Notification Configuration
+SLACK_WEBHOOK_URL = 'http://51.222.244.92:8904/send_message' # Your webhook URL
+HEADERS = {'Content-Type': 'application/json'}
 
 # --- Change 2: Define IST timezone ---
 IST_TZ = pytz.timezone('Asia/Kolkata')
@@ -55,6 +59,31 @@ def init_db():
         st.error(f"Database connection failed: {e}")
         return None
 
+
+def send_slack_notification(message,mention_type):
+    """
+    Sends a message to the configured Slack channel.
+    """
+    if not SLACK_WEBHOOK_URL:
+        st.warning("Slack webhook URL not configured. Skipping notification.")
+        return
+
+    try:
+        json_data = {
+            'message': message,
+            'mention_type': mention_type,  # Or 'here', 'everyone', or specific user IDs
+        }
+        response = requests.post(SLACK_WEBHOOK_URL, headers=HEADERS, json=json_data)
+
+        # Check if the request was successful (optional, depends on your webhook's response)
+        if response.status_code != 200:
+            st.warning(
+                f"Slack notification might have failed. Status code: {response.status_code}, Response: {response.text}")
+
+    except Exception as e:
+        st.error(f"Failed to send Slack notification: {e}")
+
+
 # --- Existing Functions (potentially modified) ---
 def get_active_sessions(connection):
     try:
@@ -82,6 +111,9 @@ def start_session(connection, username, email, system_ip, planned_duration, reas
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (username, email, system_ip, ist_now, planned_duration, reason))
         connection.commit()
+
+        message = f"🟢 *System Connected* | User: `{username}` | IP: `{system_ip}` | Duration: `{planned_duration} min` | Reason: `{reason}`"
+        send_slack_notification(message,"channel")
         return True
     except Exception as e:
         st.error(f"Error starting session: {e}")
@@ -100,10 +132,30 @@ def end_session(connection, email, system_ip):
                 WHERE email = %s AND system_ip = %s AND end_time IS NULL
             """, (ist_now, ist_now, email, system_ip))
         connection.commit()
+        # --- Add Slack Notification Logic ---
+        if cursor.rowcount > 0:  # Check if an update actually happened
+            # 1. Notify that the system is now free
+            # You might want to fetch the username for a more detailed message
+            # For now, we know the email and IP
+            message_free = f"🔵 *System Disconnected* | IP: `{system_ip}` is now *free*."
+            send_slack_notification(message_free,"channel")
+
+            # 2. Check if someone is in the queue and notify them
+            next_user_info = get_next_user_in_queue(connection)
+            if next_user_info:
+                next_username, next_email = next_user_info
+                # Format message to tag the user (assuming email maps to Slack user ID or they have notifications set up for mentions)
+                # If your webhook supports tagging by email/user_id, use that. Otherwise, just mention the name/email.
+                # Example using plain text mention (Slack often highlights names/emails):
+                message_notify = f"<@{next_email}> or <{next_username}>, the system `{system_ip}` is now free! You are next in the queue."
+                # If your webhook requires a specific format for user mentions, adjust the message accordingly.
+                send_slack_notification(message_notify,"channel")
+
         return True
     except Exception as e:
         st.error(f"Error ending session: {e}")
         return False
+
 
 def get_usage_history(connection):
     try:
@@ -120,10 +172,9 @@ def get_usage_history(connection):
         st.error(f"Error fetching history: {e}")
         return []
 
-# --- New Queue Management Functions ---
-# --- Change 6: Use IST datetime for requested_time (via DEFAULT CURRENT_TIMESTAMP and session TZ) ---
 # The DEFAULT CURRENT_TIMESTAMP in the table definition will now use IST because of the session timezone.
 # If you explicitly wanted to pass it (though not necessary with DEFAULT), you would use ist_now = datetime.now(IST_TZ)
+
 def add_to_queue(connection, username, email, reason):
     """Adds a user request to the queue."""
     try:
@@ -139,6 +190,7 @@ def add_to_queue(connection, username, email, reason):
         st.error(f"Error adding to queue: {e}")
         return False
 
+
 def get_queue(connection):
     """Retrieves the current queue, ordered by request time."""
     try:
@@ -153,6 +205,7 @@ def get_queue(connection):
         st.error(f"Error fetching queue: {e}")
         return []
 
+
 def remove_from_queue(connection, email):
     """Removes a user from the queue."""
     try:
@@ -166,6 +219,7 @@ def remove_from_queue(connection, email):
     except Exception as e:
         st.error(f"Error removing from queue: {e}")
         return False
+
 
 def get_user_queue_position(connection, email):
     """Gets the position of a user in the queue (1-based index). Returns -1 if not in queue."""
@@ -187,6 +241,26 @@ def get_user_queue_position(connection, email):
     except Exception as e:
          st.error(f"Error getting queue position: {e}")
          return -1
+
+
+def get_next_user_in_queue(connection):
+    """
+    Retrieves the username and email of the user at the front of the queue.
+    Returns a tuple (username, email) or None if queue is empty.
+    """
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT username, email
+                FROM usage_queue
+                ORDER BY requested_time ASC
+                LIMIT 1
+            """)
+            result = cursor.fetchone()
+            return result # Returns (username, email) tuple or None
+    except Exception as e:
+        st.error(f"Error fetching next user from queue: {e}")
+        return None
 
 # Calculate time remaining - Ensure times used are timezone-aware if comparing with Python datetime
 # --- Change 7: Ensure datetime.now() uses IST for comparisons ---
@@ -215,7 +289,7 @@ def is_session_overdue(start_time, planned_duration):
     now_ist = datetime.now(IST_TZ)
     return now_ist > end_time
 
-# Format timedelta to human readable (no change needed here)
+
 def format_duration(td):
     if td is None:
         return "0m 0s"
@@ -566,13 +640,14 @@ def main_app():
         st.dataframe(history_df[["User", "System IP", "Start Time", "End Time", "Actual Duration (min)", "Planned Duration (min)", "Reason"]]) # Include Reason, also showing Start/End Time
     else:
         st.info("No usage history found")
-# ... (login_screen, run_app, and if __name__ == "__main__" remain the same) ...
-# Login screen
+
+
 def login_screen():
     st.header("🔒 System Usage Tracker")
     st.subheader("Please log in with Google to continue")
     if st.button("Log in with Google", type="primary"):
         st.login(provider="google")
+
 # Main application logic
 def run_app():
     # Initialize database (ensures tables are created)
@@ -594,6 +669,7 @@ def run_app():
         # Show login screen
         login_screen()
 # Initialize session state keys if they don't exist
+
 if 'user_info' not in st.session_state:
     st.session_state.user_info = None
 # Run the app
