@@ -347,7 +347,10 @@ def main_app():
     SYSTEMS = [
         "172.27.131.163",
         "172.27.131.164",
-        "172.27.131.165"
+        "172.27.131.165",
+        "172.27.132.145",
+        "172.27.132.146",
+        "172.27.132.147"
     ]
     # Get user info from authentication
     user_info = st.session_state.get('user_info', {})
